@@ -2,6 +2,11 @@ name: Daily 160125 post-market NAV estimate
 
 on:
   workflow_dispatch:
+    inputs:
+      as_of_date:
+        description: "Optional valuation date in YYYY-MM-DD; leave blank for today"
+        required: false
+        type: string
   schedule:
     # 18:01 Asia/Shanghai on weekdays; GitHub cron is UTC.
     - cron: "1 10 * * 1-5"
@@ -36,7 +41,7 @@ jobs:
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: 1874103486@qq.com
           PYTHONPATH: ${{ github.workspace }}/src
-        run: python -m valuation_160125.cli --send-email --output-dir artifacts
+        run: python -m valuation_160125.cli --date "${{ inputs.as_of_date }}" --send-email --output-dir artifacts
 
       - name: Upload report artifact
         if: always()
