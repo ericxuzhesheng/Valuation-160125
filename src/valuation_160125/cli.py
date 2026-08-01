@@ -9,7 +9,15 @@ from typing import Any
 
 import pandas as pd
 
-from .core import CrossCheck, benchmark_return, estimate_nav, numeric_cross_check
+from .core import (
+    CrossCheck,
+    benchmark_return,
+    calibrated_return,
+    disclosed_holdings_return,
+    ensemble_return,
+    estimate_nav,
+    numeric_cross_check,
+)
 from .emailer import send_report_email
 from .providers import AKShareProvider, ProviderError, TushareProvider
 from .report import render_markdown, write_report
@@ -92,8 +100,163 @@ def _usdcnh_levels(frame: pd.DataFrame, as_of: date) -> tuple[float, float] | No
     return previous / 7.8, current / 7.8
 
 
+def _price_pair(frame: pd.DataFrame, as_of: date) -> tuple[float, float] | None:
+    if frame.empty:
+        return None
+    date_column = next(
+        (column for column in ("trade_date", "日期", "date") if column in frame.columns),
+        None,
+    )
+    close_column = next(
+        (column for column in ("close", "收盘", "收盘价") if column in frame.columns),
+        None,
+    )
+    if date_column is None or close_column is None:
+        return None
+    result = frame.copy()
+    result[date_column] = pd.to_datetime(result[date_column], errors="coerce").dt.date
+    result[close_column] = pd.to_numeric(result[close_column], errors="coerce")
+    result = result.dropna(subset=[date_column, close_column])
+    result = result[(result[date_column] <= as_of) & (result[close_column] > 0)]
+    if len(result) < 2:
+        return None
+    result = result.sort_values(date_column)
+    return float(result.iloc[-2][close_column]), float(result.iloc[-1][close_column])
+
+
+def _normalise_holdings(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["symbol", "weight_pct"])
+    symbol_column = next(
+        (column for column in ("symbol", "股票代码") if column in frame.columns), None
+    )
+    weight_column = next(
+        (
+            column
+            for column in ("weight_pct", "stk_mkv_ratio", "占净值比例")
+            if column in frame.columns
+        ),
+        None,
+    )
+    if symbol_column is None or weight_column is None:
+        return pd.DataFrame(columns=["symbol", "weight_pct"])
+    result = pd.DataFrame(
+        {
+            "symbol": frame[symbol_column]
+            .astype(str)
+            .str.extract(r"(\d+)")[0]
+            .str.zfill(5),
+            "weight_pct": pd.to_numeric(
+                frame[weight_column].astype(str).str.replace("%", "", regex=False),
+                errors="coerce",
+            ),
+        }
+    )
+    return result.dropna(subset=["symbol", "weight_pct"])
+
+
+def _historical_proxy_returns(
+    nav_frame: pd.DataFrame,
+    hsi_frame: pd.DataFrame,
+    as_of: date,
+    fx_frame: pd.DataFrame | None = None,
+) -> tuple[list[float], list[float]]:
+    nav = _sorted_frame(nav_frame, "nav_date")
+    nav = nav[nav["nav_date"] <= as_of].copy()
+    nav["nav"] = pd.to_numeric(nav.get("unit_nav"), errors="coerce")
+    nav = nav.dropna(subset=["nav"])
+    hsi = _sorted_frame(hsi_frame, "trade_date")
+    hsi["close"] = pd.to_numeric(hsi.get("close"), errors="coerce")
+    hsi = hsi.dropna(subset=["close"])
+    hsi_returns: dict[date, float] = {}
+    for index in range(1, len(hsi)):
+        previous = float(hsi.iloc[index - 1]["close"])
+        current = float(hsi.iloc[index]["close"])
+        if previous > 0 and current > 0:
+            hsi_returns[hsi.iloc[index]["trade_date"]] = current / previous - 1.0
+    if fx_frame is not None and not fx_frame.empty:
+        fx = _sorted_frame(fx_frame, "trade_date")
+        close_column = "bid_close" if "bid_close" in fx.columns else "close"
+        fx["fx"] = pd.to_numeric(fx.get(close_column), errors="coerce")
+        fx = fx.dropna(subset=["fx"])
+        fx_by_date = {
+            row["trade_date"]: float(row["fx"]) / 7.8
+            for _, row in fx.iterrows()
+            if float(row["fx"]) > 0
+        }
+        for index in range(1, len(hsi)):
+            current_date = hsi.iloc[index]["trade_date"]
+            previous_date = hsi.iloc[index - 1]["trade_date"]
+            if current_date in fx_by_date and previous_date in fx_by_date:
+                hsi_returns[current_date] = (
+                    (float(hsi.iloc[index]["close"]) / float(hsi.iloc[index - 1]["close"]))
+                    * (fx_by_date[current_date] / fx_by_date[previous_date])
+                    - 1.0
+                ) * 0.95
+    fund_returns: list[float] = []
+    proxy_returns: list[float] = []
+    for index in range(1, len(nav)):
+        previous = float(nav.iloc[index - 1]["nav"])
+        current = float(nav.iloc[index]["nav"])
+        current_date = nav.iloc[index]["nav_date"]
+        if previous > 0 and current > 0 and current_date in hsi_returns:
+            fund_returns.append(current / previous - 1.0)
+            proxy_returns.append(hsi_returns[current_date])
+    return fund_returns, proxy_returns
+
+
+def _holdings_price_returns(
+    holdings: pd.DataFrame,
+    tushare: TushareProvider | None,
+    akshare: AKShareProvider | None,
+    as_of: date,
+    price_start: date,
+    fx_levels: tuple[float, float],
+) -> tuple[list[dict[str, float | str]], dict[str, int]]:
+    marked: list[dict[str, float | str]] = []
+    stats = {"total": len(holdings), "priced": 0, "tushare": 0, "akshare": 0}
+    for _, row in holdings.iterrows():
+        symbol = str(row["symbol"]).zfill(5)
+        price_pair = None
+        price_source = None
+        if tushare is not None:
+            try:
+                price_pair = _price_pair(tushare.hk_daily(symbol, price_start, as_of), as_of)
+                if price_pair is not None:
+                    price_source = "Tushare"
+            except ProviderError:
+                pass
+        if price_pair is None and akshare is not None:
+            try:
+                price_pair = _price_pair(akshare.hk_daily(symbol, price_start, as_of), as_of)
+                if price_pair is not None:
+                    price_source = "AKShare"
+            except ProviderError:
+                pass
+        if price_pair is None:
+            continue
+        previous_price, current_price = price_pair
+        local_return = current_price / previous_price - 1.0
+        rmb_return = (
+            (current_price / previous_price) * (fx_levels[1] / fx_levels[0]) - 1.0
+        )
+        marked.append(
+            {
+                "symbol": symbol,
+                "weight": float(row["weight_pct"]) / 100.0,
+                "return": rmb_return,
+                "local_return": local_return,
+                "price_source": price_source or "unknown",
+            }
+        )
+        stats["priced"] += 1
+        stats[price_source.lower()] += 1
+    return marked, stats
+
+
 def build_live_report(as_of: date) -> dict[str, Any]:
-    lookback = as_of - timedelta(days=14)
+    lookback = as_of - timedelta(days=400)
+    price_start = as_of - timedelta(days=10)
     notes: list[str] = []
     tushare = None
     akshare = None
@@ -110,6 +273,7 @@ def build_live_report(as_of: date) -> dict[str, Any]:
     published_nav: float | None = None
     tushare_nav: float | None = None
     akshare_nav: float | None = None
+    nav_frame = pd.DataFrame()
     if tushare is not None:
         try:
             nav_frame = tushare.fund_nav(lookback, as_of)
@@ -133,9 +297,11 @@ def build_live_report(as_of: date) -> dict[str, Any]:
 
     tushare_pair = None
     akshare_pair = None
+    hsi_frame = pd.DataFrame()
     if tushare is not None:
         try:
-            tushare_pair = _hsi_pair(tushare.hsi(lookback, as_of), as_of, "trade_date")
+            hsi_frame = tushare.hsi(lookback, as_of)
+            tushare_pair = _hsi_pair(hsi_frame, as_of, "trade_date")
         except ProviderError as exc:
             notes.append(str(exc))
     if akshare is not None:
@@ -169,9 +335,11 @@ def build_live_report(as_of: date) -> dict[str, Any]:
         checks["hsi_close"] = {"status": "akshare_fallback", "left": None, "right": current_hsi}
 
     fx_levels = None
+    fx_frame = pd.DataFrame()
     if tushare is not None:
         try:
-            fx_levels = _usdcnh_levels(tushare.usdcnh(lookback, as_of), as_of)
+            fx_frame = tushare.usdcnh(lookback, as_of)
+            fx_levels = _usdcnh_levels(fx_frame, as_of)
         except ProviderError as exc:
             notes.append(str(exc))
     if fx_levels is None:
@@ -192,29 +360,131 @@ def build_live_report(as_of: date) -> dict[str, Any]:
         current_hkd_cny=fx_levels[1],
         equity_weight=0.95,
     )
-    estimate = estimate_nav(published_nav, daily_return)
+    # Public holdings are quarterly and incomplete. Mark the disclosed names
+    # directly, then assign the undisclosed residual to the benchmark.
+    tushare_holdings = pd.DataFrame()
+    akshare_holdings = pd.DataFrame()
+    holdings_report_date: str | None = None
+    if tushare is not None:
+        try:
+            tushare_holdings = _normalise_holdings(tushare.fund_holdings())
+        except ProviderError as exc:
+            notes.append(str(exc))
+    if akshare is not None:
+        try:
+            ak_payload = akshare.fund_holdings()
+            akshare_holdings = _normalise_holdings(ak_payload["data"])
+            holdings_report_date = ak_payload.get("as_of_date")
+        except ProviderError as exc:
+            notes.append(str(exc))
 
-    statuses = [check["status"] for check in checks.values()]
-    confidence = (
-        "medium"
-        if statuses
-        and all(status in {"match", "tushare_only"} for status in statuses)
-        and checks["fx_hkd_cny"]["status"] != "missing"
-        else "low"
+    checks["holdings_count"] = {
+        "status": (
+            "match"
+            if not tushare_holdings.empty
+            and not akshare_holdings.empty
+            and len(tushare_holdings) == len(akshare_holdings)
+            else "tushare_only"
+            if not tushare_holdings.empty
+            else "akshare_only"
+            if not akshare_holdings.empty
+            else "missing"
+        ),
+        "left": float(len(tushare_holdings)) if not tushare_holdings.empty else None,
+        "right": float(len(akshare_holdings)) if not akshare_holdings.empty else None,
+        "delta": (
+            float(len(akshare_holdings) - len(tushare_holdings))
+            if not tushare_holdings.empty and not akshare_holdings.empty
+            else None
+        ),
+    }
+    selected_holdings = (
+        tushare_holdings if not tushare_holdings.empty else akshare_holdings
     )
-    notes.append("最新持仓未纳入本版估算，当前使用恒生指数 95% + 现金 5% 基准兜底")
+    holdings_source = "Tushare" if not tushare_holdings.empty else "AKShare"
+
+    method_returns: dict[str, float] = {"benchmark": daily_return}
+    method_weights: dict[str, float] = {"benchmark": 0.25}
+    marked_holdings: list[dict[str, float | str]] = []
+    holding_stats = {"total": 0, "priced": 0, "tushare": 0, "akshare": 0}
+    covered_weight = 0.0
+    if not selected_holdings.empty:
+        marked_holdings, holding_stats = _holdings_price_returns(
+            selected_holdings,
+            tushare,
+            akshare,
+            as_of,
+            price_start,
+            fx_levels,
+        )
+        if marked_holdings:
+            holdings_return, covered_weight = disclosed_holdings_return(
+                marked_holdings,
+                residual_return=daily_return,
+            )
+            method_returns["disclosed_holdings"] = holdings_return
+            method_weights["disclosed_holdings"] = 0.65
+            notes.append(
+                f"披露持仓模型使用 {holding_stats['priced']}/{holding_stats['total']} 只股票，"
+                f"直接覆盖净值权重约 {covered_weight:.2%}；未披露部分使用恒生指数代理。"
+            )
+        else:
+            notes.append("已找到披露持仓，但当前没有可用的港股价格，未纳入直接持仓模型。")
+
+    calibration = None
+    if not nav_frame.empty and not hsi_frame.empty:
+        fund_returns, proxy_returns = _historical_proxy_returns(
+            nav_frame,
+            hsi_frame,
+            as_of,
+            fx_frame,
+        )
+        calibration = calibrated_return(daily_return, fund_returns, proxy_returns)
+        if calibration is not None:
+            method_returns["historical_calibration"] = calibration[0]
+            method_weights["historical_calibration"] = 0.10
+            notes.append(
+                f"历史校准使用 {calibration[1]['observations']} 个共同观测，"
+                f"beta={calibration[1]['beta']:.3f}。"
+            )
+
+    if "disclosed_holdings" not in method_returns:
+        method_weights["benchmark"] = 0.80
+        if "historical_calibration" in method_returns:
+            method_weights["historical_calibration"] = 0.20
+    final_return = ensemble_return(method_returns, method_weights)
+    estimate = estimate_nav(published_nav, final_return)
+
+    if marked_holdings and holding_stats["priced"] == holding_stats["total"]:
+        confidence = "high" if checks["fx_hkd_cny"]["status"] != "missing" else "medium"
+    elif marked_holdings:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    if not marked_holdings:
+        notes.append("未能使用披露持仓，估值退回恒生指数基准模型。")
+
     return {
         "as_of_date": as_of.isoformat(),
         "fund_code": "160125",
         "published_nav_date": published_date.isoformat(),
         "published_nav": published_nav,
         "nav_estimate": estimate,
-        "estimate_mode": "benchmark_fallback",
+        "estimate_mode": "disclosed_holdings_ensemble" if marked_holdings else "benchmark_fallback",
         "confidence": confidence,
         "previous_hsi": previous_hsi,
         "current_hsi": current_hsi,
         "previous_hsi_date": previous_date.isoformat(),
-        "daily_return": daily_return,
+        "daily_return": final_return,
+        "benchmark_return": daily_return,
+        "method_returns": method_returns,
+        "method_weights": method_weights,
+        "holdings_source": holdings_source if not selected_holdings.empty else None,
+        "holdings_report_date": holdings_report_date,
+        "holdings_count": holding_stats["total"],
+        "priced_holdings_count": holding_stats["priced"],
+        "covered_weight": covered_weight,
+        "holding_marks": marked_holdings,
         "source_checks": checks,
         "notes": notes,
         "generated_at": datetime.now().astimezone().isoformat(),

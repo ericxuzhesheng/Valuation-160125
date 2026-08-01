@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import isfinite
 from statistics import mean
-from typing import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,97 @@ def estimate_nav(previous_nav: float, daily_return: float) -> float:
     if previous_nav <= 0:
         raise ValueError("previous_nav must be positive")
     return previous_nav * (1.0 + daily_return)
+
+
+def disclosed_holdings_return(
+    holdings: Iterable[Mapping[str, float]],
+    residual_return: float,
+) -> tuple[float, float]:
+    """Mark disclosed holdings and use a proxy for the undisclosed residual.
+
+    Public-fund reports normally disclose the top holdings, not the complete
+    intraday portfolio.  ``weight`` is expressed as a fraction of NAV and
+    ``return`` is the local-currency-to-RMB total return of that security.
+    The undisclosed weight is explicitly assigned to ``residual_return`` so
+    the estimate remains fully invested instead of silently renormalising the
+    disclosed top holdings to 100%.
+    """
+    if not isfinite(residual_return):
+        raise ValueError("residual_return must be finite")
+    covered_weight = 0.0
+    marked_return = 0.0
+    for holding in holdings:
+        weight = float(holding["weight"])
+        security_return = float(holding["return"])
+        if not isfinite(weight) or not isfinite(security_return):
+            raise ValueError("holding weights and returns must be finite")
+        if weight < 0 or weight > 1:
+            raise ValueError("holding weight must be between 0 and 1")
+        covered_weight += weight
+        marked_return += weight * security_return
+    if covered_weight > 1.0 + 1e-9:
+        raise ValueError("disclosed holding weights cannot exceed 100%")
+    covered_weight = min(1.0, covered_weight)
+    return marked_return + (1.0 - covered_weight) * residual_return, covered_weight
+
+
+def calibrated_return(
+    current_proxy_return: float,
+    historical_fund_returns: Sequence[float],
+    historical_proxy_returns: Sequence[float],
+    *,
+    min_observations: int = 20,
+) -> tuple[float, dict[str, float | int]] | None:
+    """Forecast today's fund return with a bounded rolling proxy regression."""
+    if not isfinite(current_proxy_return):
+        raise ValueError("current_proxy_return must be finite")
+    pairs = [
+        (float(fund), float(proxy))
+        for fund, proxy in zip(historical_fund_returns, historical_proxy_returns)
+        if isfinite(float(fund)) and isfinite(float(proxy))
+    ]
+    if len(pairs) < min_observations:
+        return None
+    fund_values = [pair[0] for pair in pairs]
+    proxy_values = [pair[1] for pair in pairs]
+    fund_mean = mean(fund_values)
+    proxy_mean = mean(proxy_values)
+    variance = sum((value - proxy_mean) ** 2 for value in proxy_values)
+    if variance <= 1e-16:
+        return None
+    covariance = sum(
+        (fund - fund_mean) * (proxy - proxy_mean)
+        for fund, proxy in pairs
+    )
+    beta = covariance / variance
+    beta = max(0.25, min(1.75, beta))
+    alpha = fund_mean - beta * proxy_mean
+    forecast = alpha + beta * current_proxy_return
+    return forecast, {
+        "observations": len(pairs),
+        "alpha": alpha,
+        "beta": beta,
+    }
+
+
+def ensemble_return(
+    method_returns: Mapping[str, float],
+    method_weights: Mapping[str, float],
+) -> float:
+    """Combine available return methods after normalising their weights."""
+    selected = [
+        (name, float(method_returns[name]), float(method_weights.get(name, 0.0)))
+        for name in method_returns
+        if name in method_weights and method_weights[name] > 0
+    ]
+    if not selected:
+        raise ValueError("at least one weighted return method is required")
+    if any(not isfinite(value) or weight < 0 for _, value, weight in selected):
+        raise ValueError("method returns and weights must be finite")
+    total_weight = sum(weight for _, _, weight in selected)
+    if total_weight <= 0:
+        raise ValueError("method weights must have positive total")
+    return sum(value * weight for _, value, weight in selected) / total_weight
 
 
 def numeric_cross_check(

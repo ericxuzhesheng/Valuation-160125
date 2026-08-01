@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
+from io import StringIO
 from math import isfinite
+import re
 from typing import Any
 
 import pandas as pd
+import requests
 
 
 class ProviderError(RuntimeError):
@@ -74,6 +77,14 @@ class TushareProvider:
             )
         except Exception as exc:
             raise ProviderError(f"Tushare fund_nav failed: {type(exc).__name__}") from exc
+
+    def fund_holdings(self) -> pd.DataFrame:
+        try:
+            return self.pro.fund_portfolio(ts_code="160125.SZ")
+        except Exception as exc:
+            raise ProviderError(
+                f"Tushare fund_portfolio failed: {type(exc).__name__}"
+            ) from exc
 
     def hsi(self, start_date: date | str, end_date: date | str) -> pd.DataFrame:
         try:
@@ -180,6 +191,81 @@ class AKShareProvider:
             "previous_nav": previous,
             "previous_date": previous_date,
         }
+
+    def fund_holdings(self) -> dict[str, Any]:
+        """Fetch the latest public portfolio table with an Eastmoney header.
+
+        AKShare's parser uses the same endpoint, but Eastmoney can reject a
+        request without a browser-like Referer/User-Agent.  Keeping the
+        request here makes the daily job more reproducible while preserving
+        AKShare as the library/data-source fallback.
+        """
+        url = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+        params = {
+            "type": "jjcc",
+            "code": "160125",
+            "topline": "10000",
+            "year": "",
+            "month": "",
+            "rt": "0.913877030254846",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://fundf10.eastmoney.com/ccmx_160125.html",
+        }
+        try:
+            response = _bounded_call(
+                "AKShare fund_portfolio_hold_em",
+                lambda: requests.get(url, params=params, headers=headers, timeout=self.timeout),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            match = re.search(r'content:"(.*)",arryear:', response.text, flags=re.S)
+            if not match:
+                raise ProviderError("Eastmoney portfolio response has no content")
+            content = match.group(1)
+            soup = self._soup(content)
+            labels = [
+                item.get_text(" ", strip=True)
+                for item in soup.find_all(name="h4", attrs={"class": "t"})
+            ]
+            tables = pd.read_html(StringIO(content), converters={"股票代码": str})
+            if not labels or not tables:
+                raise ProviderError("Eastmoney returned no public holding table")
+            table = tables[0].copy()
+            weight_column = next(
+                (column for column in table.columns if "占净值" in str(column)), None
+            )
+            if weight_column is None:
+                raise ProviderError("public holding table has no NAV-weight column")
+            table["weight_pct"] = pd.to_numeric(
+                table[weight_column].astype(str).str.replace("%", "", regex=False),
+                errors="coerce",
+            )
+            table["symbol"] = (
+                table["股票代码"].astype(str).str.extract(r"(\d+)")[0].str.zfill(5)
+            )
+            table = table.dropna(subset=["symbol", "weight_pct"])
+            report_date_match = re.search(r"截止至：\s*(\d{4}-\d{2}-\d{2})", labels[0])
+            report_date = report_date_match.group(1) if report_date_match else None
+            return {
+                "as_of_date": report_date,
+                "data": table[["symbol", "weight_pct"]].reset_index(drop=True),
+                "source": "AKShare/Eastmoney",
+                "raw_label": labels[0],
+            }
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"AKShare fund_portfolio_hold_em failed: {type(exc).__name__}"
+            ) from exc
+
+    @staticmethod
+    def _soup(content: str) -> Any:
+        from bs4 import BeautifulSoup
+
+        return BeautifulSoup(content, features="lxml")
 
 
 def previous_calendar_date(as_of: date) -> date:

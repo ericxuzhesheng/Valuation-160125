@@ -20,12 +20,20 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- 估算净值：**{_display(report.get('nav_estimate'))}**",
         f"- 估算模型：`{report.get('estimate_mode', 'unknown')}`",
         f"- 置信等级：`{report.get('confidence', 'unknown')}`",
+        f"- 披露持仓：{report.get('holdings_report_date', '—')}，"
+        f"已计价 {report.get('priced_holdings_count', 0)}/{report.get('holdings_count', 0)} 只，"
+        f"覆盖权重 {_display(report.get('covered_weight'))}",
         f"- 最近公布净值：{_display(report.get('published_nav'))} "
         f"（日期 {report.get('published_nav_date', '—')}）",
         "",
         "## 双源校验",
         "",
     ]
+    method_returns = report.get("method_returns") or {}
+    if method_returns:
+        lines.extend(["", "## 估值方法", ""])
+        for name, value in method_returns.items():
+            lines.append(f"- `{name}`: {_display(value)}")
     for name, check in (report.get("source_checks") or {}).items():
         lines.append(
             f"- `{name}`: **{check.get('status', 'unknown')}**; "
@@ -48,4 +56,3 @@ def write_report(report: dict[str, Any], output_dir: str | Path) -> tuple[Path, 
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     markdown_path.write_text(render_markdown(report), encoding="utf-8")
     return json_path, markdown_path
-

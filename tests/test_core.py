@@ -4,6 +4,9 @@ import pytest
 
 from valuation_160125.core import (
     benchmark_return,
+    calibrated_return,
+    disclosed_holdings_return,
+    ensemble_return,
     estimate_nav,
     numeric_cross_check,
     summarize_backtest_errors,
@@ -47,3 +50,29 @@ def test_backtest_summary_is_auditable():
     assert summary["observations"] == 3
     assert summary["mae"] == pytest.approx(0.002)
     assert summary["max_abs_error"] == pytest.approx(0.003)
+
+
+def test_disclosed_holdings_keep_undisclosed_residual_on_proxy():
+    result, covered = disclosed_holdings_return(
+        [{"weight": 0.4, "return": 0.10}],
+        residual_return=0.01,
+    )
+    assert covered == pytest.approx(0.4)
+    assert result == pytest.approx(0.046)
+
+
+def test_calibration_is_bounded_and_requires_history():
+    assert calibrated_return(0.01, [0.01] * 5, [0.01] * 5) is None
+    result = calibrated_return(
+        0.01,
+        [0.0, 0.02, -0.01, 0.03] * 6,
+        [0.0, 0.01, -0.005, 0.015] * 6,
+    )
+    assert result is not None
+    forecast, diagnostics = result
+    assert diagnostics["observations"] == 24
+    assert forecast == pytest.approx(0.01875, abs=1e-6)
+
+
+def test_ensemble_normalises_available_method_weights():
+    assert ensemble_return({"a": 0.01, "b": 0.03}, {"a": 1, "b": 3}) == pytest.approx(0.025)
