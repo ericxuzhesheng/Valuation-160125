@@ -525,7 +525,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", default="artifacts")
     parser.add_argument("--offline-demo", action="store_true")
     parser.add_argument("--send-email", action="store_true")
+    parser.add_argument("--backtest", action="store_true")
+    parser.add_argument("--backtest-start", default="2025-07-01")
+    parser.add_argument("--backtest-end")
     args = parser.parse_args(argv)
+
+    if args.backtest:
+        from .backtest import run_backtest, write_backtest
+
+        try:
+            result = run_backtest(
+                date.fromisoformat(args.backtest_start),
+                date.fromisoformat(args.backtest_end) if args.backtest_end else date.today(),
+                token=os.environ.get("TUSHARE_TOKEN"),
+            )
+            paths = write_backtest(result, args.output_dir)
+            output = {
+                "backtest_json": str(paths[0]),
+                "backtest_csv": str(paths[1]),
+                "observations": result["observations"],
+                "metrics": result["metrics"],
+            }
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return 0
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {"backtest": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
 
     try:
         report = build_demo_report() if args.offline_demo else build_live_report(_date(args.as_of))

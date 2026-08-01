@@ -192,7 +192,7 @@ class AKShareProvider:
             "previous_date": previous_date,
         }
 
-    def fund_holdings(self) -> dict[str, Any]:
+    def fund_holdings(self, year: str = "") -> dict[str, Any]:
         """Fetch the latest public portfolio table with an Eastmoney header.
 
         AKShare's parser uses the same endpoint, but Eastmoney can reject a
@@ -205,7 +205,7 @@ class AKShareProvider:
             "type": "jjcc",
             "code": "160125",
             "topline": "10000",
-            "year": "",
+            "year": year,
             "month": "",
             "rt": "0.913877030254846",
         }
@@ -232,27 +232,40 @@ class AKShareProvider:
             tables = pd.read_html(StringIO(content), converters={"股票代码": str})
             if not labels or not tables:
                 raise ProviderError("Eastmoney returned no public holding table")
-            table = tables[0].copy()
-            weight_column = next(
-                (column for column in table.columns if "占净值" in str(column)), None
-            )
-            if weight_column is None:
-                raise ProviderError("public holding table has no NAV-weight column")
-            table["weight_pct"] = pd.to_numeric(
-                table[weight_column].astype(str).str.replace("%", "", regex=False),
-                errors="coerce",
-            )
-            table["symbol"] = (
-                table["股票代码"].astype(str).str.extract(r"(\d+)")[0].str.zfill(5)
-            )
-            table = table.dropna(subset=["symbol", "weight_pct"])
-            report_date_match = re.search(r"截止至：\s*(\d{4}-\d{2}-\d{2})", labels[0])
-            report_date = report_date_match.group(1) if report_date_match else None
+            reports: list[dict[str, Any]] = []
+            for label, raw_table in zip(labels, tables):
+                table = raw_table.copy()
+                weight_column = next(
+                    (column for column in table.columns if "占净值" in str(column)), None
+                )
+                if weight_column is None or "股票代码" not in table.columns:
+                    continue
+                table["weight_pct"] = pd.to_numeric(
+                    table[weight_column].astype(str).str.replace("%", "", regex=False),
+                    errors="coerce",
+                )
+                table["symbol"] = (
+                    table["股票代码"].astype(str).str.extract(r"(\d+)")[0].str.zfill(5)
+                )
+                table = table.dropna(subset=["symbol", "weight_pct"])
+                report_date_match = re.search(r"截止至：\s*(\d{4}-\d{2}-\d{2})", label)
+                report_date = report_date_match.group(1) if report_date_match else None
+                if report_date and not table.empty:
+                    reports.append(
+                        {
+                            "as_of_date": report_date,
+                            "data": table[["symbol", "weight_pct"]].reset_index(drop=True),
+                            "raw_label": label,
+                        }
+                    )
+            if not reports:
+                raise ProviderError("public holding table has no usable rows")
             return {
-                "as_of_date": report_date,
-                "data": table[["symbol", "weight_pct"]].reset_index(drop=True),
+                "as_of_date": reports[0]["as_of_date"],
+                "data": reports[0]["data"],
+                "reports": reports,
                 "source": "AKShare/Eastmoney",
-                "raw_label": labels[0],
+                "raw_label": reports[0]["raw_label"],
             }
         except ProviderError:
             raise

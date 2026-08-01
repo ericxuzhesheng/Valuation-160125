@@ -34,6 +34,9 @@ python -m valuation_160125.cli --output-dir artifacts
 # 不联网的演示与格式检查
 python -m valuation_160125.cli --offline-demo --output-dir artifacts
 python -m pytest
+
+# 历史回测：只在季度报告日后 22 天启用该披露持仓快照，输出 JSON 和 CSV
+python -m valuation_160125.cli --backtest --backtest-start 2025-07-01 --backtest-end 2026-07-31 --output-dir artifacts
 ```
 
 ## GitHub Actions 远程定时邮件
