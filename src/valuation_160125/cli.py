@@ -548,6 +548,10 @@ def build_live_report(as_of: date) -> dict[str, Any]:
             + ", ".join(item["symbol"] for item in holding_stats["failures"])
         )
 
+    if marked_holdings:
+        sources = sorted({str(item.get("price_source", "unknown")) for item in marked_holdings})
+        notes.append("持仓价格来源：" + ", ".join(sources))
+
     calibration = None
     fund_returns: list[float] = []
     proxy_returns: list[float] = []
@@ -586,7 +590,12 @@ def build_live_report(as_of: date) -> dict[str, Any]:
     estimate = estimate_nav(published_nav, final_return)
 
     if marked_holdings and holding_stats["priced"] == holding_stats["total"]:
-        confidence = "high" if checks["fx_hkd_cny"]["status"] != "missing" else "medium"
+        used_fallback = any(item.get("price_source") == "Tencent" for item in marked_holdings)
+        confidence = (
+            "high"
+            if not used_fallback and checks["fx_hkd_cny"]["status"] != "missing"
+            else "medium"
+        )
     elif marked_holdings:
         confidence = "medium"
     else:
