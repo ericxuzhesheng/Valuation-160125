@@ -141,6 +141,59 @@ def ensemble_return(
     return sum(value * weight for _, value, weight in selected) / total_weight
 
 
+def adaptive_method_weights(
+    method_returns: Mapping[str, float],
+    historical_errors: Mapping[str, Sequence[float]],
+    base_weights: Mapping[str, float],
+    *,
+    min_observations: int = 30,
+    max_weights: Mapping[str, float] | None = None,
+) -> dict[str, float]:
+    """Down-weight methods whose prior out-of-sample errors were larger.
+
+    The caller supplies only errors known before the forecast date.  Scores
+    are relative to the median eligible MAE, so a method with no history keeps
+    its prior weight instead of receiving an artificially large score.
+    """
+    names = [name for name in method_returns if base_weights.get(name, 0.0) > 0]
+    if not names:
+        raise ValueError("base_weights must contain a positive weight")
+    weights = {name: float(base_weights.get(name, 0.0)) for name in names}
+    eligible_mae: dict[str, float] = {}
+    for name in names:
+        errors = [abs(float(error)) for error in historical_errors.get(name, ()) if isfinite(float(error))]
+        if len(errors) >= min_observations:
+            eligible_mae[name] = mean(errors)
+    if eligible_mae:
+        reference = sorted(eligible_mae.values())[len(eligible_mae) // 2]
+        reference = max(reference, 1e-6)
+        for name, mae in eligible_mae.items():
+            weights[name] *= reference / max(mae, 1e-6)
+    total = sum(weights.values())
+    weights = {name: value / total for name, value in weights.items()}
+
+    if max_weights:
+        capped = {
+            name: min(value, float(max_weights.get(name, 1.0)))
+            for name, value in weights.items()
+        }
+        excess = 1.0 - sum(capped.values())
+        uncapped = [
+            name for name in names
+            if capped[name] < float(max_weights.get(name, 1.0)) - 1e-12
+        ]
+        if excess > 0 and uncapped:
+            room = sum(float(max_weights.get(name, 1.0)) - capped[name] for name in uncapped)
+            if room > 0:
+                for name in uncapped:
+                    share = (float(max_weights.get(name, 1.0)) - capped[name]) / room
+                    capped[name] += excess * share
+        weights = capped
+        total = sum(weights.values())
+        weights = {name: value / total for name, value in weights.items()}
+    return weights
+
+
 def numeric_cross_check(
     left: float | None,
     right: float | None,

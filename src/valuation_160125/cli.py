@@ -11,6 +11,7 @@ import pandas as pd
 
 from .core import (
     CrossCheck,
+    adaptive_method_weights,
     benchmark_return,
     calibrated_return,
     disclosed_holdings_return,
@@ -403,8 +404,8 @@ def build_live_report(as_of: date) -> dict[str, Any]:
     )
     holdings_source = "Tushare" if not tushare_holdings.empty else "AKShare"
 
-    method_returns: dict[str, float] = {"benchmark": daily_return}
-    method_weights: dict[str, float] = {"benchmark": 0.25}
+    method_returns: dict[str, float] = {"benchmark": daily_return, "carry": 0.0}
+    base_weights: dict[str, float] = {"benchmark": 0.65, "carry": 0.15}
     marked_holdings: list[dict[str, float | str]] = []
     holding_stats = {"total": 0, "priced": 0, "tushare": 0, "akshare": 0}
     covered_weight = 0.0
@@ -423,7 +424,7 @@ def build_live_report(as_of: date) -> dict[str, Any]:
                 residual_return=daily_return,
             )
             method_returns["disclosed_holdings"] = holdings_return
-            method_weights["disclosed_holdings"] = 0.65
+            base_weights["disclosed_holdings"] = 0.02
             notes.append(
                 f"披露持仓模型使用 {holding_stats['priced']}/{holding_stats['total']} 只股票，"
                 f"直接覆盖净值权重约 {covered_weight:.2%}；未披露部分使用恒生指数代理。"
@@ -432,6 +433,8 @@ def build_live_report(as_of: date) -> dict[str, Any]:
             notes.append("已找到披露持仓，但当前没有可用的港股价格，未纳入直接持仓模型。")
 
     calibration = None
+    fund_returns: list[float] = []
+    proxy_returns: list[float] = []
     if not nav_frame.empty and not hsi_frame.empty:
         fund_returns, proxy_returns = _historical_proxy_returns(
             nav_frame,
@@ -442,16 +445,27 @@ def build_live_report(as_of: date) -> dict[str, Any]:
         calibration = calibrated_return(daily_return, fund_returns, proxy_returns)
         if calibration is not None:
             method_returns["historical_calibration"] = calibration[0]
-            method_weights["historical_calibration"] = 0.10
+            base_weights["historical_calibration"] = 0.18
             notes.append(
                 f"历史校准使用 {calibration[1]['observations']} 个共同观测，"
                 f"beta={calibration[1]['beta']:.3f}。"
             )
 
-    if "disclosed_holdings" not in method_returns:
-        method_weights["benchmark"] = 0.80
-        if "historical_calibration" in method_returns:
-            method_weights["historical_calibration"] = 0.20
+    historical_errors = {
+        "benchmark": [fund_proxy - fund for fund, fund_proxy in zip(fund_returns, proxy_returns)],
+        "carry": [-fund for fund in fund_returns],
+    }
+    method_weights = adaptive_method_weights(
+        method_returns,
+        historical_errors,
+        base_weights,
+        max_weights={
+            "benchmark": 0.80,
+            "carry": 0.30,
+            "disclosed_holdings": 0.08,
+            "historical_calibration": 0.35,
+        },
+    )
     final_return = ensemble_return(method_returns, method_weights)
     estimate = estimate_nav(published_nav, final_return)
 
@@ -526,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--offline-demo", action="store_true")
     parser.add_argument("--send-email", action="store_true")
     parser.add_argument("--backtest", action="store_true")
-    parser.add_argument("--backtest-start", default="2025-07-01")
+    parser.add_argument("--backtest-start", default="2015-01-01")
     parser.add_argument("--backtest-end")
     args = parser.parse_args(argv)
 

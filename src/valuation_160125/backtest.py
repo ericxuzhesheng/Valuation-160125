@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from math import isfinite, sqrt
 from pathlib import Path
@@ -10,6 +11,7 @@ import pandas as pd
 
 from .cli import _normalise_holdings, _sorted_frame
 from .core import (
+    adaptive_method_weights,
     benchmark_return,
     calibrated_return,
     disclosed_holdings_return,
@@ -54,6 +56,26 @@ def _daily_returns(series: dict[date, float]) -> dict[date, float]:
         for index in range(1, len(dates))
         if series[dates[index - 1]] > 0 and series[dates[index]] > 0
     }
+
+
+def _rmb_price_returns(
+    frame: pd.DataFrame,
+    fx: dict[date, float],
+) -> dict[date, float]:
+    local_prices = _close_series(frame)
+    dates = sorted(local_prices)
+    result: dict[date, float] = {}
+    for index in range(1, len(dates)):
+        previous_date = dates[index - 1]
+        current_date = dates[index]
+        if current_date not in fx or previous_date not in fx:
+            continue
+        result[current_date] = (
+            (local_prices[current_date] / local_prices[previous_date])
+            * (fx[current_date] / fx[previous_date])
+            - 1.0
+        )
+    return result
 
 
 def _snapshot_reports(
@@ -167,25 +189,21 @@ def run_backtest(
     )
     price_returns: dict[str, dict[date, float]] = {}
     price_failures: list[str] = []
-    for symbol in symbols:
+    def fetch_symbol(symbol: str) -> tuple[str, dict[date, float] | None]:
         try:
             frame = tushare.hk_daily(symbol, fetch_start, end_date)
-            local_prices = _close_series(frame)
-            local_returns = _daily_returns(local_prices)
-            price_returns[symbol] = {
-                target_date: (
-                    (1.0 + local_return)
-                    * (
-                        fx.get(target_date, 1.0)
-                        / fx.get(sorted(local_prices)[max(0, sorted(local_prices).index(target_date) - 1)], 1.0)
-                    )
-                    - 1.0
-                )
-                for target_date, local_return in local_returns.items()
-                if target_date in fx or not fx
-            }
+            return symbol, _rmb_price_returns(frame, fx)
         except ProviderError:
-            price_failures.append(symbol)
+            return symbol, None
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(fetch_symbol, symbol) for symbol in symbols]
+        for future in as_completed(futures):
+            symbol, returns = future.result()
+            if returns is None:
+                price_failures.append(symbol)
+            else:
+                price_returns[symbol] = returns
 
     rows: list[dict[str, Any]] = []
     nav_dates = [d for d in nav["nav_date"].tolist() if start_date < d <= end_date]
@@ -216,6 +234,8 @@ def run_backtest(
             "actual_return": actual_return,
             "benchmark_return": benchmark,
             "benchmark_nav": estimate_nav(previous_nav, benchmark),
+            "carry_return": 0.0,
+            "carry_nav": previous_nav,
         }
         snapshot = _snapshot_for_date(snapshots, target_date)
         if snapshot is not None:
@@ -235,6 +255,27 @@ def run_backtest(
                 row["disclosed_holdings_nav"] = estimate_nav(previous_nav, holdings_ret)
                 row["holdings_covered_weight"] = covered
                 row["holdings_snapshot_date"] = snapshot["report_date"].isoformat()
+        if "disclosed_holdings_return" in row:
+            prior_fund = [
+                float(previous["actual_return"])
+                for previous in rows[-120:]
+                if previous.get("disclosed_holdings_return") is not None
+            ]
+            prior_holdings = [
+                float(previous["disclosed_holdings_return"])
+                for previous in rows[-120:]
+                if previous.get("disclosed_holdings_return") is not None
+            ]
+            holdings_calibration = calibrated_return(
+                float(row["disclosed_holdings_return"]),
+                prior_fund,
+                prior_holdings,
+            )
+            if holdings_calibration is not None:
+                row["holdings_calibration_return"] = holdings_calibration[0]
+                row["holdings_calibration_nav"] = estimate_nav(
+                    previous_nav, holdings_calibration[0]
+                )
         historical = history_returns + [
             prior["actual_return"]
             for prior in rows[-400:]
@@ -249,23 +290,49 @@ def run_backtest(
         if calibration is not None:
             row["historical_calibration_return"] = calibration[0]
             row["historical_calibration_nav"] = estimate_nav(previous_nav, calibration[0])
-        methods = {"benchmark": benchmark}
-        weights = {"benchmark": 0.80}
+        methods = {"benchmark": benchmark, "carry": 0.0}
+        base_weights = {"benchmark": 0.65, "carry": 0.15}
         if "disclosed_holdings_return" in row:
             methods["disclosed_holdings"] = row["disclosed_holdings_return"]
-            weights["disclosed_holdings"] = 0.65
-            weights["benchmark"] = 0.25
+            base_weights["disclosed_holdings"] = 0.02
         if "historical_calibration_return" in row:
             methods["historical_calibration"] = row["historical_calibration_return"]
-            weights["historical_calibration"] = 0.10 if "disclosed_holdings_return" in row else 0.20
+            base_weights["historical_calibration"] = 0.18
+        historical_errors = {
+            method: [
+                float(previous.get(f"{method}_return")) - float(previous["actual_return"])
+                for previous in rows[-120:]
+                if previous.get(f"{method}_return") is not None
+            ]
+            for method in methods
+        }
+        weights = adaptive_method_weights(
+            methods,
+            historical_errors,
+            base_weights,
+            max_weights={
+                "benchmark": 0.80,
+                "carry": 0.30,
+                "disclosed_holdings": 0.08,
+                "historical_calibration": 0.35,
+            },
+        )
         final = ensemble_return(methods, weights)
         row["ensemble_return"] = final
         row["ensemble_nav"] = estimate_nav(previous_nav, final)
+        row["ensemble_weights"] = weights
         rows.append(row)
 
     metrics = {
         method: _metric_rows(rows, method)
-        for method in ("benchmark", "disclosed_holdings", "historical_calibration", "ensemble")
+        for method in (
+            "benchmark",
+            "carry",
+            "disclosed_holdings",
+            "holdings_calibration",
+            "historical_calibration",
+            "ensemble",
+        )
     }
     return {
         "start_date": start_date.isoformat(),

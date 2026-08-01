@@ -4,6 +4,7 @@ import pytest
 
 from valuation_160125.core import (
     benchmark_return,
+    adaptive_method_weights,
     calibrated_return,
     disclosed_holdings_return,
     ensemble_return,
@@ -76,3 +77,14 @@ def test_calibration_is_bounded_and_requires_history():
 
 def test_ensemble_normalises_available_method_weights():
     assert ensemble_return({"a": 0.01, "b": 0.03}, {"a": 1, "b": 3}) == pytest.approx(0.025)
+
+
+def test_adaptive_weights_downweight_poor_prior_method():
+    weights = adaptive_method_weights(
+        {"benchmark": 0.01, "holdings": 0.02},
+        {"benchmark": [0.001] * 30, "holdings": [0.004] * 30},
+        {"benchmark": 0.8, "holdings": 0.2},
+        max_weights={"benchmark": 0.9, "holdings": 0.3},
+    )
+    assert weights["benchmark"] > weights["holdings"]
+    assert sum(weights.values()) == pytest.approx(1.0)
