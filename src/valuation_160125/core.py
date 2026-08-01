@@ -23,6 +23,12 @@ def benchmark_return(
     cash_return: float = 0.0,
 ) -> float:
     """Return the RMB-marked benchmark return for one trading day."""
+    if not all(isfinite(value) for value in (previous_hsi, current_hsi)):
+        raise ValueError("HSI levels must be finite")
+    if not all(isfinite(value) for value in (previous_hkd_cny, current_hkd_cny)):
+        raise ValueError("HKD/CNY levels must be finite")
+    if not isfinite(cash_return):
+        raise ValueError("cash_return must be finite")
     if previous_hsi <= 0 or current_hsi <= 0:
         raise ValueError("HSI levels must be positive")
     if previous_hkd_cny <= 0 or current_hkd_cny <= 0:
@@ -37,6 +43,8 @@ def benchmark_return(
 
 
 def estimate_nav(previous_nav: float, daily_return: float) -> float:
+    if not isfinite(previous_nav) or not isfinite(daily_return):
+        raise ValueError("NAV and return must be finite")
     if previous_nav <= 0:
         raise ValueError("previous_nav must be positive")
     return previous_nav * (1.0 + daily_return)
@@ -51,6 +59,8 @@ def numeric_cross_check(
 ) -> CrossCheck:
     if left is None or right is None:
         return CrossCheck("missing", left, right, None)
+    if not isfinite(float(left)) or not isfinite(float(right)):
+        return CrossCheck("invalid", float(left), float(right), None)
     delta = float(right) - float(left)
     tolerance = max(absolute_tolerance, abs(float(left)) * relative_tolerance)
     status = "match" if abs(delta) <= tolerance else "mismatch"
@@ -74,4 +84,3 @@ def summarize_backtest_errors(errors: Iterable[float]) -> dict[str, float | int 
         "max_abs_error": max(values),
         "p90_abs_error": ordered[p90_index],
     }
-

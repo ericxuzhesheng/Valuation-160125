@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from datetime import date, datetime, timedelta
-from pathlib import Path
+from math import isfinite
 from typing import Any
 
 import pandas as pd
@@ -24,7 +24,7 @@ def _float(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if pd.notna(number) else None
+    return number if pd.notna(number) and isfinite(number) else None
 
 
 def _check_to_dict(check: CrossCheck) -> dict[str, Any]:
@@ -87,34 +87,103 @@ def _usdcnh_levels(frame: pd.DataFrame, as_of: date) -> tuple[float, float] | No
     current = _float(frame.iloc[-1].get(close_column))
     if previous is None or current is None or previous <= 0 or current <= 0:
         return None
-    # HKD is effectively pegged to USD; HKD/CNY is proportional to 1/USDCNH.
-    return 7.8 / previous, 7.8 / current
+    # HKD is effectively pegged to USD; USDCNH is CNY per USD, so
+    # HKD/CNY is approximately USDCNH / 7.8.
+    return previous / 7.8, current / 7.8
 
 
 def build_live_report(as_of: date) -> dict[str, Any]:
     lookback = as_of - timedelta(days=14)
-    token = os.environ.get("TUSHARE_TOKEN")
-    tushare = TushareProvider(token=token)
-    akshare = AKShareProvider()
-
-    nav_frame = tushare.fund_nav(lookback, as_of)
-    published_date, published_nav = _latest_published_nav(nav_frame, as_of - timedelta(days=1))
-    tushare_hsi = tushare.hsi(lookback, as_of)
-    previous_date, previous_hsi, current_hsi, _ = _hsi_pair(
-        tushare_hsi, as_of, "trade_date"
-    )
-
     notes: list[str] = []
-    fx_frame = pd.DataFrame()
-    fx_levels = None
+    tushare = None
+    akshare = None
     try:
-        fx_frame = tushare.usdcnh(lookback, as_of)
-        fx_levels = _usdcnh_levels(fx_frame, as_of)
+        tushare = TushareProvider(token=os.environ.get("TUSHARE_TOKEN"))
     except ProviderError as exc:
-        notes.append(str(exc))
+        notes.append(f"Tushare 初始化失败，尝试 AKShare 备用：{exc}")
+    try:
+        akshare = AKShareProvider()
+    except ProviderError as exc:
+        notes.append(f"AKShare 初始化失败：{exc}")
+
+    published_date: date | None = None
+    published_nav: float | None = None
+    tushare_nav: float | None = None
+    akshare_nav: float | None = None
+    if tushare is not None:
+        try:
+            nav_frame = tushare.fund_nav(lookback, as_of)
+            published_date, published_nav = _latest_published_nav(
+                nav_frame, as_of - timedelta(days=1)
+            )
+            tushare_nav = published_nav
+        except ProviderError as exc:
+            notes.append(str(exc))
+    if akshare is not None:
+        try:
+            ak_snapshot = akshare.fund_daily_snapshot()
+            akshare_nav = _float(ak_snapshot.get("previous_nav"))
+            if published_nav is None and akshare_nav is not None:
+                published_nav = akshare_nav
+                published_date = date.fromisoformat(str(ak_snapshot["previous_date"]))
+        except ProviderError as exc:
+            notes.append(str(exc))
+    if published_nav is None or published_date is None:
+        raise ProviderError("Tushare 与 AKShare 均未取得最近公布净值")
+
+    tushare_pair = None
+    akshare_pair = None
+    if tushare is not None:
+        try:
+            tushare_pair = _hsi_pair(tushare.hsi(lookback, as_of), as_of, "trade_date")
+        except ProviderError as exc:
+            notes.append(str(exc))
+    if akshare is not None:
+        try:
+            akshare_pair = _hsi_pair(akshare.hsi(), as_of, "date")
+        except ProviderError as exc:
+            notes.append(str(exc))
+    if tushare_pair is None and akshare_pair is None:
+        raise ProviderError("Tushare 与 AKShare 均未取得恒生指数当前/前一交易日数据")
+    selected_pair = tushare_pair or akshare_pair
+    assert selected_pair is not None
+    previous_date, previous_hsi, current_hsi, _ = selected_pair
+
+    checks: dict[str, dict[str, Any]] = {}
+    if tushare_nav is not None and akshare_nav is not None:
+        checks["fund_nav"] = _check_to_dict(
+            numeric_cross_check(tushare_nav, akshare_nav, absolute_tolerance=0.0001)
+        )
+    elif tushare_nav is not None:
+        checks["fund_nav"] = {"status": "tushare_only", "left": tushare_nav, "right": None}
+    else:
+        checks["fund_nav"] = {"status": "akshare_fallback", "left": None, "right": akshare_nav}
+
+    if tushare_pair is not None and akshare_pair is not None:
+        checks["hsi_close"] = _check_to_dict(
+            numeric_cross_check(tushare_pair[2], akshare_pair[2], absolute_tolerance=0.02)
+        )
+    elif tushare_pair is not None:
+        checks["hsi_close"] = {"status": "tushare_only", "left": current_hsi, "right": None}
+    else:
+        checks["hsi_close"] = {"status": "akshare_fallback", "left": None, "right": current_hsi}
+
+    fx_levels = None
+    if tushare is not None:
+        try:
+            fx_levels = _usdcnh_levels(tushare.usdcnh(lookback, as_of), as_of)
+        except ProviderError as exc:
+            notes.append(str(exc))
     if fx_levels is None:
         fx_levels = (1.0, 1.0)
+        checks["fx_hkd_cny"] = {"status": "missing", "left": None, "right": None}
         notes.append("汇率数据不可用，估算暂不计入 HKD/CNY 当日变化")
+    else:
+        checks["fx_hkd_cny"] = {
+            "status": "tushare_only",
+            "left": fx_levels[0],
+            "right": fx_levels[1],
+        }
 
     daily_return = benchmark_return(
         previous_hsi=previous_hsi,
@@ -125,32 +194,14 @@ def build_live_report(as_of: date) -> dict[str, Any]:
     )
     estimate = estimate_nav(published_nav, daily_return)
 
-    checks: dict[str, dict[str, Any]] = {}
-    try:
-        ak_hsi = akshare.hsi()
-        _, _, ak_current_hsi, _ = _hsi_pair(ak_hsi, as_of, "date")
-        checks["hsi_close"] = _check_to_dict(
-            numeric_cross_check(current_hsi, ak_current_hsi, absolute_tolerance=0.02)
-        )
-    except ProviderError as exc:
-        checks["hsi_close"] = _check_to_dict(numeric_cross_check(current_hsi, None))
-        notes.append(str(exc))
-
-    try:
-        ak_nav = akshare.fund_daily_snapshot()
-        checks["fund_nav"] = _check_to_dict(
-            numeric_cross_check(
-                published_nav,
-                _float(ak_nav.get("previous_nav")),
-                absolute_tolerance=0.0001,
-            )
-        )
-    except ProviderError as exc:
-        checks["fund_nav"] = _check_to_dict(numeric_cross_check(published_nav, None))
-        notes.append(str(exc))
-
     statuses = [check["status"] for check in checks.values()]
-    confidence = "medium" if statuses and all(status == "match" for status in statuses) else "low"
+    confidence = (
+        "medium"
+        if statuses
+        and all(status in {"match", "tushare_only"} for status in statuses)
+        and checks["fx_hkd_cny"]["status"] != "missing"
+        else "low"
+    )
     notes.append("最新持仓未纳入本版估算，当前使用恒生指数 95% + 现金 5% 基准兜底")
     return {
         "as_of_date": as_of.isoformat(),
@@ -239,4 +290,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

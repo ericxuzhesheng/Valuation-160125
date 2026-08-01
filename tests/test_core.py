@@ -29,6 +29,13 @@ def test_estimate_nav_is_based_on_previous_published_nav():
     assert estimate_nav(1.5568, 0.001) == pytest.approx(1.5583568)
 
 
+def test_non_finite_inputs_are_rejected():
+    with pytest.raises(ValueError):
+        estimate_nav(float("inf"), 0.001)
+    with pytest.raises(ValueError):
+        benchmark_return(100.0, float("nan"))
+
+
 def test_cross_check_distinguishes_match_and_mismatch():
     assert numeric_cross_check(100.0, 100.004, absolute_tolerance=0.01).status == "match"
     assert numeric_cross_check(100.0, 100.2, absolute_tolerance=0.01).status == "mismatch"
@@ -40,4 +47,3 @@ def test_backtest_summary_is_auditable():
     assert summary["observations"] == 3
     assert summary["mae"] == pytest.approx(0.002)
     assert summary["max_abs_error"] == pytest.approx(0.003)
-

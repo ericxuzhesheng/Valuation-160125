@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
+from math import isfinite
 from typing import Any
 
 import pandas as pd
@@ -8,6 +10,25 @@ import pandas as pd
 
 class ProviderError(RuntimeError):
     """A data provider failed or returned unusable data."""
+
+
+def _bounded_call(label: str, function: Any, *, timeout: int = 45, attempts: int = 2) -> Any:
+    """Run an AKShare call with a bounded wait and one retry."""
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(function)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError as exc:
+            last_error = exc
+        except Exception as exc:  # pragma: no cover - provider-specific errors
+            last_error = exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        if attempt + 1 < attempts:
+            continue
+    raise ProviderError(f"{label} timed out or failed after {attempts} attempts") from last_error
 
 
 def _date_text(value: date | str) -> str:
@@ -25,7 +46,7 @@ def _as_float(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if pd.notna(number) else None
+    return number if pd.notna(number) and isfinite(number) else None
 
 
 class TushareProvider:
@@ -34,9 +55,15 @@ class TushareProvider:
             import tushare as ts
         except ImportError as exc:  # pragma: no cover - environment failure
             raise ProviderError("tushare is not installed") from exc
-        if token:
-            ts.set_token(token)
-        self.pro = ts.pro_api()
+        if not token:
+            try:
+                token = ts.get_token()
+            except Exception:
+                token = None
+        if not token:
+            raise ProviderError("TUSHARE_TOKEN is missing")
+        # Do not call set_token(), which persists the token in the user profile.
+        self.pro = ts.pro_api(token=token, timeout=30)
 
     def fund_nav(self, start_date: date | str, end_date: date | str) -> pd.DataFrame:
         try:
@@ -84,16 +111,21 @@ class TushareProvider:
 
 
 class AKShareProvider:
-    def __init__(self) -> None:
+    def __init__(self, timeout: int = 45) -> None:
         try:
             import akshare as ak
         except ImportError as exc:  # pragma: no cover - environment failure
             raise ProviderError("akshare is not installed") from exc
         self.ak = ak
+        self.timeout = timeout
 
     def hsi(self) -> pd.DataFrame:
         try:
-            return self.ak.stock_hk_index_daily_sina(symbol="HSI")
+            return _bounded_call(
+                "AKShare stock_hk_index_daily_sina",
+                lambda: self.ak.stock_hk_index_daily_sina(symbol="HSI"),
+                timeout=self.timeout,
+            )
         except Exception as exc:
             raise ProviderError(
                 f"AKShare stock_hk_index_daily_sina failed: {type(exc).__name__}"
@@ -103,19 +135,27 @@ class AKShareProvider:
         self, symbol: str, start_date: date | str, end_date: date | str
     ) -> pd.DataFrame:
         try:
-            return self.ak.stock_hk_hist(
-                symbol=symbol.zfill(5),
-                period="daily",
-                start_date=_yyyymmdd(start_date),
-                end_date=_yyyymmdd(end_date),
-                adjust="",
+            return _bounded_call(
+                "AKShare stock_hk_hist",
+                lambda: self.ak.stock_hk_hist(
+                    symbol=symbol.zfill(5),
+                    period="daily",
+                    start_date=_yyyymmdd(start_date),
+                    end_date=_yyyymmdd(end_date),
+                    adjust="",
+                ),
+                timeout=self.timeout,
             )
         except Exception as exc:
             raise ProviderError(f"AKShare stock_hk_hist failed: {type(exc).__name__}") from exc
 
     def fund_daily_snapshot(self) -> dict[str, float | str | None]:
         try:
-            frame = self.ak.fund_open_fund_daily_em()
+            frame = _bounded_call(
+                "AKShare fund_open_fund_daily_em",
+                self.ak.fund_open_fund_daily_em,
+                timeout=self.timeout,
+            )
         except Exception as exc:
             raise ProviderError(
                 f"AKShare fund_open_fund_daily_em failed: {type(exc).__name__}"
@@ -144,4 +184,3 @@ class AKShareProvider:
 
 def previous_calendar_date(as_of: date) -> date:
     return as_of - timedelta(days=1)
-

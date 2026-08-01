@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Daily post-market NAV estimate for fund 160125 with Tushare/AKShare cross-checks"
 requires-python = ">=3.10"
 dependencies = [
-  "akshare>=1.18.80,<2",
-  "pandas>=2.0,<3",
-  "tushare>=1.4.0,<2",
+  "akshare==1.18.46",
+  "pandas==2.3.3",
+  "tushare==1.4.29",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<9"]
+dev = ["pytest==8.4.2"]
 
 [project.scripts]
 nav160125 = "valuation_160125.cli:main"
@@ -22,4 +22,3 @@ nav160125 = "valuation_160125.cli:main"
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src"]
-
