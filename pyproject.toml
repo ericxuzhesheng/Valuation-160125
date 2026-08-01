@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "valuation-160125"
+version = "0.1.0"
+description = "Daily post-market NAV estimate for fund 160125 with Tushare/AKShare cross-checks"
+requires-python = ">=3.10"
+dependencies = [
+  "akshare>=1.18.80,<2",
+  "pandas>=2.0,<3",
+  "tushare>=1.4.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+nav160125 = "valuation_160125.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+

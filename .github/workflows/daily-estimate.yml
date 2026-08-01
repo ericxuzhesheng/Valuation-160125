@@ -1,0 +1,47 @@
+name: Daily 160125 post-market NAV estimate
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 18:30 Asia/Shanghai on weekdays; GitHub cron is UTC.
+    - cron: "30 10 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  estimate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Estimate and email
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: python -m valuation_160125.cli --send-email --output-dir artifacts
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nav-estimate-${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: warn

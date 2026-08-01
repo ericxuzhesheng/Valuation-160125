@@ -1,0 +1,5 @@
+akshare>=1.18.80,<2
+pandas>=2.0,<3
+pytest>=8,<9
+tushare>=1.4.0,<2
+
