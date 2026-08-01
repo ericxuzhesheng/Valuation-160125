@@ -41,7 +41,7 @@ python -m valuation_160125.cli --backtest --backtest-start 2025-07-01 --backtest
 
 ## GitHub Actions 远程定时邮件
 
-`.github/workflows/daily-estimate.yml` 在工作日 UTC 10:30 运行，即北京时间约 18:30。GitHub Actions 的定时任务可能有延迟，邮件应理解为盘后参考，不是交易执行信号。
+`.github/workflows/daily-estimate.yml` 在工作日 UTC 10:01 运行，即北京时间约 18:01，收件人为 `1874103486@qq.com`。GitHub Actions 的定时任务可能有延迟，邮件应理解为盘后参考，不是交易执行信号。
 
 在仓库的 **Settings → Secrets and variables → Actions** 中添加以下 Repository secrets：
 

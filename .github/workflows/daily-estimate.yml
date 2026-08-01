@@ -3,8 +3,8 @@ name: Daily 160125 post-market NAV estimate
 on:
   workflow_dispatch:
   schedule:
-    # 18:30 Asia/Shanghai on weekdays; GitHub cron is UTC.
-    - cron: "30 10 * * 1-5"
+    # 18:01 Asia/Shanghai on weekdays; GitHub cron is UTC.
+    - cron: "1 10 * * 1-5"
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
-          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_TO: 1874103486@qq.com
           PYTHONPATH: ${{ github.workspace }}/src
         run: python -m valuation_160125.cli --send-email --output-dir artifacts
 
