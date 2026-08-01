@@ -52,6 +52,43 @@ def _as_float(value: Any) -> float | None:
     return number if pd.notna(number) and isfinite(number) else None
 
 
+def tencent_hk_spot(symbols: list[str], timeout: int = 20) -> pd.DataFrame:
+    """Fetch latest/previous HK prices in one request as a final fallback."""
+    normalized = sorted({str(symbol).split(".")[0].zfill(5) for symbol in symbols})
+    if not normalized:
+        return pd.DataFrame(columns=["代码", "最新价", "昨收"])
+    query = ",".join(f"r_hk{symbol}" for symbol in normalized)
+    try:
+        response = requests.get(
+            "https://qt.gtimg.cn/q=" + query,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        rows: list[dict[str, str]] = []
+        for item in response.text.split(";"):
+            match = re.search(r'v_r_hk(\d+)="(.*)"', item)
+            if not match:
+                continue
+            fields = match.group(2).split("~")
+            if len(fields) < 5:
+                continue
+            rows.append(
+                {
+                    "代码": match.group(1).zfill(5),
+                    "最新价": fields[3],
+                    "昨收": fields[4],
+                }
+            )
+        if not rows:
+            raise ProviderError("Tencent HK quote returned no usable rows")
+        return pd.DataFrame(rows)
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderError(f"Tencent HK quote failed: {type(exc).__name__}") from exc
+
+
 class TushareProvider:
     def __init__(self, token: str | None = None) -> None:
         try:

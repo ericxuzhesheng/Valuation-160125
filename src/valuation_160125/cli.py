@@ -20,7 +20,7 @@ from .core import (
     numeric_cross_check,
 )
 from .emailer import send_report_email
-from .providers import AKShareProvider, ProviderError, TushareProvider
+from .providers import AKShareProvider, ProviderError, TushareProvider, tencent_hk_spot
 from .report import render_markdown, write_report
 
 
@@ -267,6 +267,7 @@ def _holdings_price_returns(
     tushare: TushareProvider | None,
     akshare: AKShareProvider | None,
     akshare_spot: pd.DataFrame | None,
+    tencent_spot: pd.DataFrame | None,
     as_of: date,
     price_start: date,
     fx_levels: tuple[float, float],
@@ -277,10 +278,12 @@ def _holdings_price_returns(
         "priced": 0,
         "tushare": 0,
         "akshare_spot": 0,
+        "tencent": 0,
         "akshare": 0,
         "failures": [],
     }
     spot_pairs = _spot_price_pairs(akshare_spot)
+    tencent_pairs = _spot_price_pairs(tencent_spot)
     for _, row in holdings.iterrows():
         symbol = str(row["symbol"]).zfill(5)
         price_pair = None
@@ -298,6 +301,9 @@ def _holdings_price_returns(
         if price_pair is None and symbol in spot_pairs:
             price_pair = spot_pairs[symbol]
             price_source = "AKShareSpot"
+        if price_pair is None and symbol in tencent_pairs:
+            price_pair = tencent_pairs[symbol]
+            price_source = "Tencent"
         if price_pair is None and akshare is not None:
             try:
                 price_pair = _flexible_price_pair(
@@ -328,6 +334,7 @@ def _holdings_price_returns(
         source_key = {
             "Tushare": "tushare",
             "AKShareSpot": "akshare_spot",
+            "Tencent": "tencent",
             "AKShare": "akshare",
         }.get(price_source or "")
         if source_key is not None:
@@ -488,6 +495,14 @@ def build_live_report(as_of: date) -> dict[str, Any]:
         tushare_holdings if not tushare_holdings.empty else akshare_holdings
     )
     holdings_source = "Tushare" if not tushare_holdings.empty else "AKShare"
+    tencent_spot = pd.DataFrame()
+    if not selected_holdings.empty:
+        try:
+            tencent_spot = tencent_hk_spot(
+                selected_holdings["symbol"].astype(str).tolist()
+            )
+        except ProviderError as exc:
+            notes.append(str(exc))
 
     method_returns: dict[str, float] = {"benchmark": daily_return, "carry": 0.0}
     base_weights: dict[str, float] = {"benchmark": 0.65, "carry": 0.15}
@@ -497,6 +512,7 @@ def build_live_report(as_of: date) -> dict[str, Any]:
         "priced": 0,
         "tushare": 0,
         "akshare_spot": 0,
+        "tencent": 0,
         "akshare": 0,
         "failures": [],
     }
@@ -507,6 +523,7 @@ def build_live_report(as_of: date) -> dict[str, Any]:
             tushare,
             akshare,
             akshare_spot,
+            tencent_spot,
             as_of,
             price_start,
             fx_levels,
