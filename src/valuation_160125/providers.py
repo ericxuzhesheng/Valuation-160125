@@ -160,6 +160,19 @@ class AKShareProvider:
         except Exception as exc:
             raise ProviderError(f"AKShare stock_hk_hist failed: {type(exc).__name__}") from exc
 
+    def hk_spot(self) -> pd.DataFrame:
+        """Fetch the latest trading-day quote for all Hong Kong stocks once."""
+        try:
+            return _bounded_call(
+                "AKShare stock_hk_spot_em",
+                self.ak.stock_hk_spot_em,
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            raise ProviderError(
+                f"AKShare stock_hk_spot_em failed: {type(exc).__name__}"
+            ) from exc
+
     def fund_daily_snapshot(self) -> dict[str, float | str | None]:
         try:
             frame = _bounded_call(

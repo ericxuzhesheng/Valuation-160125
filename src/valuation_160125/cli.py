@@ -125,6 +125,62 @@ def _price_pair(frame: pd.DataFrame, as_of: date) -> tuple[float, float] | None:
     return float(result.iloc[-2][close_column]), float(result.iloc[-1][close_column])
 
 
+def _flexible_price_pair(frame: pd.DataFrame, as_of: date) -> tuple[float, float] | None:
+    """Accept Tushare English columns and AKShare's actual Chinese columns."""
+    if frame.empty:
+        return None
+    date_column = next(
+        (column for column in ("trade_date", "日期", "date") if column in frame.columns),
+        None,
+    )
+    close_column = next(
+        (
+            column
+            for column in ("close", "收盘", "收盘价", "最新价", "latest")
+            if column in frame.columns
+        ),
+        None,
+    )
+    if date_column is None or close_column is None:
+        return None
+    result = frame.copy()
+    result[date_column] = pd.to_datetime(result[date_column], errors="coerce").dt.date
+    result[close_column] = pd.to_numeric(result[close_column], errors="coerce")
+    result = result.dropna(subset=[date_column, close_column])
+    result = result[(result[date_column] <= as_of) & (result[close_column] > 0)]
+    if len(result) < 2:
+        return None
+    result = result.sort_values(date_column)
+    return float(result.iloc[-2][close_column]), float(result.iloc[-1][close_column])
+
+
+def _spot_price_pairs(frame: pd.DataFrame | None) -> dict[str, tuple[float, float]]:
+    if frame is None or frame.empty:
+        return {}
+    code_column = next(
+        (column for column in ("代码", "symbol", "code") if column in frame.columns),
+        None,
+    )
+    current_column = next(
+        (column for column in ("最新价", "latest", "close") if column in frame.columns),
+        None,
+    )
+    previous_column = next(
+        (column for column in ("昨收", "pre_close", "previous") if column in frame.columns),
+        None,
+    )
+    if code_column is None or current_column is None or previous_column is None:
+        return {}
+    result: dict[str, tuple[float, float]] = {}
+    for _, row in frame.iterrows():
+        symbol = str(row[code_column]).split(".")[0].strip().zfill(5)
+        previous = _float(row[previous_column])
+        current = _float(row[current_column])
+        if symbol and previous is not None and current is not None and previous > 0 and current > 0:
+            result[symbol] = (previous, current)
+    return result
+
+
 def _normalise_holdings(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame(columns=["symbol", "weight_pct"])
@@ -210,31 +266,49 @@ def _holdings_price_returns(
     holdings: pd.DataFrame,
     tushare: TushareProvider | None,
     akshare: AKShareProvider | None,
+    akshare_spot: pd.DataFrame | None,
     as_of: date,
     price_start: date,
     fx_levels: tuple[float, float],
-) -> tuple[list[dict[str, float | str]], dict[str, int]]:
+) -> tuple[list[dict[str, float | str]], dict[str, Any]]:
     marked: list[dict[str, float | str]] = []
-    stats = {"total": len(holdings), "priced": 0, "tushare": 0, "akshare": 0}
+    stats: dict[str, Any] = {
+        "total": len(holdings),
+        "priced": 0,
+        "tushare": 0,
+        "akshare_spot": 0,
+        "akshare": 0,
+        "failures": [],
+    }
+    spot_pairs = _spot_price_pairs(akshare_spot)
     for _, row in holdings.iterrows():
         symbol = str(row["symbol"]).zfill(5)
         price_pair = None
         price_source = None
+        errors: list[str] = []
         if tushare is not None:
             try:
-                price_pair = _price_pair(tushare.hk_daily(symbol, price_start, as_of), as_of)
+                price_pair = _flexible_price_pair(
+                    tushare.hk_daily(symbol, price_start, as_of), as_of
+                )
                 if price_pair is not None:
                     price_source = "Tushare"
             except ProviderError:
-                pass
+                errors.append("Tushare hk_daily failed")
+        if price_pair is None and symbol in spot_pairs:
+            price_pair = spot_pairs[symbol]
+            price_source = "AKShareSpot"
         if price_pair is None and akshare is not None:
             try:
-                price_pair = _price_pair(akshare.hk_daily(symbol, price_start, as_of), as_of)
+                price_pair = _flexible_price_pair(
+                    akshare.hk_daily(symbol, price_start, as_of), as_of
+                )
                 if price_pair is not None:
                     price_source = "AKShare"
             except ProviderError:
-                pass
+                errors.append("AKShare stock_hk_hist failed")
         if price_pair is None:
+            stats["failures"].append({"symbol": symbol, "errors": errors or ["no usable quote"]})
             continue
         previous_price, current_price = price_pair
         local_return = current_price / previous_price - 1.0
@@ -251,7 +325,13 @@ def _holdings_price_returns(
             }
         )
         stats["priced"] += 1
-        stats[price_source.lower()] += 1
+        source_key = {
+            "Tushare": "tushare",
+            "AKShareSpot": "akshare_spot",
+            "AKShare": "akshare",
+        }.get(price_source or "")
+        if source_key is not None:
+            stats[source_key] += 1
     return marked, stats
 
 
@@ -365,6 +445,7 @@ def build_live_report(as_of: date) -> dict[str, Any]:
     # directly, then assign the undisclosed residual to the benchmark.
     tushare_holdings = pd.DataFrame()
     akshare_holdings = pd.DataFrame()
+    akshare_spot = pd.DataFrame()
     holdings_report_date: str | None = None
     if tushare is not None:
         try:
@@ -376,6 +457,10 @@ def build_live_report(as_of: date) -> dict[str, Any]:
             ak_payload = akshare.fund_holdings()
             akshare_holdings = _normalise_holdings(ak_payload["data"])
             holdings_report_date = ak_payload.get("as_of_date")
+        except ProviderError as exc:
+            notes.append(str(exc))
+        try:
+            akshare_spot = akshare.hk_spot()
         except ProviderError as exc:
             notes.append(str(exc))
 
@@ -407,13 +492,21 @@ def build_live_report(as_of: date) -> dict[str, Any]:
     method_returns: dict[str, float] = {"benchmark": daily_return, "carry": 0.0}
     base_weights: dict[str, float] = {"benchmark": 0.65, "carry": 0.15}
     marked_holdings: list[dict[str, float | str]] = []
-    holding_stats = {"total": 0, "priced": 0, "tushare": 0, "akshare": 0}
+    holding_stats: dict[str, Any] = {
+        "total": 0,
+        "priced": 0,
+        "tushare": 0,
+        "akshare_spot": 0,
+        "akshare": 0,
+        "failures": [],
+    }
     covered_weight = 0.0
     if not selected_holdings.empty:
         marked_holdings, holding_stats = _holdings_price_returns(
             selected_holdings,
             tushare,
             akshare,
+            akshare_spot,
             as_of,
             price_start,
             fx_levels,
@@ -431,6 +524,12 @@ def build_live_report(as_of: date) -> dict[str, Any]:
             )
         else:
             notes.append("已找到披露持仓，但当前没有可用的港股价格，未纳入直接持仓模型。")
+
+    if holding_stats.get("failures"):
+        notes.append(
+            "未取得行情的持仓："
+            + ", ".join(item["symbol"] for item in holding_stats["failures"])
+        )
 
     calibration = None
     fund_returns: list[float] = []
@@ -497,6 +596,7 @@ def build_live_report(as_of: date) -> dict[str, Any]:
         "holdings_report_date": holdings_report_date,
         "holdings_count": holding_stats["total"],
         "priced_holdings_count": holding_stats["priced"],
+        "holding_price_failures": holding_stats.get("failures", []),
         "covered_weight": covered_weight,
         "holding_marks": marked_holdings,
         "source_checks": checks,
