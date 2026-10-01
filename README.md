@@ -1,6 +1,6 @@
 # Valuation-160125
 
-每天盘后估算南方香港优选股票（160125）的当日单位净值，并用 Tushare 与 AKShare 做交叉校验。
+每个工作日盘后估算南方香港优选股票（160125）的当日单位净值，于次日北京时间 08:00 发布，并用 Tushare 与 AKShare 做交叉校验。
 
 ## 当前模型
 
@@ -41,7 +41,9 @@ python -m valuation_160125.cli --backtest --backtest-start 2025-07-01 --backtest
 
 ## GitHub Actions 远程定时邮件
 
-`.github/workflows/daily-estimate.yml` 在工作日 UTC 10:01 运行，即北京时间约 18:01，收件人为 `1874103486@qq.com`。GitHub Actions 的定时任务可能有延迟，邮件应理解为盘后参考，不是交易执行信号。
+`.github/workflows/daily-estimate.yml` 在北京时间周二至周六 08:00 运行，发布前一天（周一至周五）的盘后净值估算，收件人为 `1874103486@qq.com`。调度时区显式设置为 `Asia/Shanghai`（UTC+8），对应 UTC 周二至周六 00:00；任务运行时区也统一为北京时间，定时运行时明确将估值日期设为北京时间的前一天。GitHub Actions 的定时任务可能有延迟，因此 08:00 是计划触发时间，邮件会在估算完成后发送。邮件应理解为盘后参考，不是交易执行信号。
+
+手动运行时可通过 `as_of_date` 指定估值日期；留空仍使用北京时间当天。
 
 在仓库的 **Settings → Secrets and variables → Actions** 中添加以下 Repository secrets：
 

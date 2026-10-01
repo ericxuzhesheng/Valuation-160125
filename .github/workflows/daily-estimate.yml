@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       as_of_date:
-        description: "Optional valuation date in YYYY-MM-DD; leave blank for today"
+        description: "Optional valuation date in YYYY-MM-DD; leave blank for today in Beijing time"
         required: false
         type: string
   schedule:
-    # 18:01 Asia/Shanghai on weekdays; GitHub cron is UTC.
-    - cron: "1 10 * * 1-5"
+    # Publish Monday-Friday reports the next morning at 08:00 Beijing time.
+    - cron: "0 8 * * 2-6"
+      timezone: Asia/Shanghai
 
 permissions:
   contents: read
@@ -18,6 +19,8 @@ jobs:
   estimate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -33,6 +36,7 @@ jobs:
 
       - name: Estimate and email
         env:
+          AS_OF_DATE: ${{ inputs.as_of_date }}
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -41,7 +45,11 @@ jobs:
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: 1874103486@qq.com
           PYTHONPATH: ${{ github.workspace }}/src
-        run: python -m valuation_160125.cli --date "${{ inputs.as_of_date }}" --send-email --output-dir artifacts
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            AS_OF_DATE="$(date --date='yesterday' +%F)"
+          fi
+          python -m valuation_160125.cli --date "$AS_OF_DATE" --send-email --output-dir artifacts
 
       - name: Upload report artifact
         if: always()
