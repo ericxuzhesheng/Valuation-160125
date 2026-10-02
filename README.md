@@ -1,6 +1,6 @@
 # Valuation-160125
 
-每个工作日盘后估算南方香港优选股票（160125）的当日单位净值，于次日北京时间 08:00 发布，并用 Tushare 与 AKShare 做交叉校验。
+在 A 股和港股共同交易日估算南方香港优选股票（160125）的盘后单位净值，于次日北京时间 08:00 发布，并用 Tushare 与 AKShare 做交叉校验。
 
 ## 当前模型
 
@@ -44,6 +44,10 @@ python -m valuation_160125.cli --backtest --backtest-start 2025-07-01 --backtest
 `.github/workflows/daily-estimate.yml` 在北京时间周二至周六 08:00 运行，发布前一天（周一至周五）的盘后净值估算，收件人为 `1874103486@qq.com`。调度时区显式设置为 `Asia/Shanghai`（UTC+8），对应 UTC 周二至周六 00:00；任务运行时区也统一为北京时间，定时运行时明确将估值日期设为北京时间的前一天。GitHub Actions 的定时任务可能有延迟，因此 08:00 是计划触发时间，邮件会在估算完成后发送。邮件应理解为盘后参考，不是交易执行信号。
 
 手动运行时可通过 `as_of_date` 指定估值日期；留空仍使用北京时间当天。
+
+定时及手动工作流均通过 `--check-trading-calendar` 检查**估值日期**（不是发送当天）的两地交易日历：A 股使用 Tushare [`trade_cal(exchange="SZSE")`](https://tushare.pro/document/2?doc_id=26)，港股使用 [`hk_tradecal`](https://tushare.pro/document/2?doc_id=250)。仅两地 `is_open=1` 时估算并发送邮件；任一市场休市时正常跳过，保留注明两地状态的报告 artifact，不发送估值或失败邮件。调休补班日不视为交易日，周五的报告仍可在周六 08:00 发送。
+
+日历接口要求 Tushare 账户具备相应权限；日历缺失、返回异常或查询失败时，任务明确失败并沿用失败通知，不退回简单的周一至周五判断。本地运行如需相同检查，也应添加 `--check-trading-calendar`；离线演示不查询日历。
 
 在仓库的 **Settings → Secrets and variables → Actions** 中添加以下 Repository secrets：
 

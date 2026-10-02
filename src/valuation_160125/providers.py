@@ -105,6 +105,31 @@ class TushareProvider:
         # Do not call set_token(), which persists the token in the user profile.
         self.pro = ts.pro_api(token=token, timeout=30)
 
+    def trading_day_status(self, as_of: date) -> dict[str, bool]:
+        """Read mainland and Hong Kong calendars; missing data is an error."""
+        day = _yyyymmdd(as_of)
+        status: dict[str, bool] = {}
+        for market, query, extra in (
+            ("SZSE", self.pro.trade_cal, {"exchange": "SZSE"}),
+            ("HKEX", self.pro.hk_tradecal, {}),
+        ):
+            try:
+                frame = query(start_date=day, end_date=day, **extra)
+            except Exception as exc:
+                raise ProviderError(
+                    f"Tushare {market} trading calendar failed: {type(exc).__name__}"
+                ) from exc
+            if frame.empty or not {"cal_date", "is_open"}.issubset(frame.columns):
+                raise ProviderError(f"Tushare {market} trading calendar is missing for {as_of}")
+            rows = frame[frame["cal_date"].astype(str).str.replace("-", "", regex=False) == day]
+            if len(rows) != 1:
+                raise ProviderError(f"Tushare {market} trading calendar has no unique row for {as_of}")
+            is_open = _as_float(rows.iloc[0]["is_open"])
+            if is_open not in (0.0, 1.0):
+                raise ProviderError(f"Tushare {market} trading calendar has invalid is_open for {as_of}")
+            status[market] = bool(is_open)
+        return status
+
     def fund_nav(self, start_date: date | str, end_date: date | str) -> pd.DataFrame:
         try:
             return self.pro.fund_nav(

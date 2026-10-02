@@ -8,7 +8,7 @@ on:
         required: false
         type: string
   schedule:
-    # Publish Monday-Friday reports the next morning at 08:00 Beijing time.
+    # At 08:00 Beijing time, publish yesterday only if both markets were open.
     - cron: "0 8 * * 2-6"
       timezone: Asia/Shanghai
 
@@ -49,7 +49,7 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             AS_OF_DATE="$(date --date='yesterday' +%F)"
           fi
-          python -m valuation_160125.cli --date "$AS_OF_DATE" --send-email --output-dir artifacts
+          python -m valuation_160125.cli --date "$AS_OF_DATE" --check-trading-calendar --send-email --output-dir artifacts
 
       - name: Upload report artifact
         if: always()

@@ -665,6 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", default="artifacts")
     parser.add_argument("--offline-demo", action="store_true")
     parser.add_argument("--send-email", action="store_true")
+    parser.add_argument("--check-trading-calendar", action="store_true",
+                        help="仅在估值日期为 A 股和港股共同交易日时估算和发送邮件")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--backtest-start", default="2015-01-01")
     parser.add_argument("--backtest-end")
@@ -699,7 +701,33 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     try:
-        report = build_demo_report() if args.offline_demo else build_live_report(_date(args.as_of))
+        calendar_status = None
+        if args.check_trading_calendar and not args.offline_demo:
+            calendar_status = TushareProvider(
+                token=os.environ.get("TUSHARE_TOKEN")
+            ).trading_day_status(_date(args.as_of))
+        if calendar_status is not None and not all(calendar_status.values()):
+            report = {
+                "as_of_date": _date(args.as_of).isoformat(),
+                "fund_code": "160125",
+                "estimate_mode": "skipped_non_trading_day",
+                "confidence": "none",
+                "nav_estimate": None,
+                "source_checks": {},
+                "notes": ["估值日期非 A 股和港股共同交易日，跳过估算与邮件发送。"],
+                "generated_at": datetime.now().astimezone().isoformat(),
+            }
+        else:
+            report = build_demo_report() if args.offline_demo else build_live_report(_date(args.as_of))
+        if calendar_status is not None:
+            report["trading_calendar"] = calendar_status
+            report["notes"].append(
+                "Tushare 交易日历："
+                + "，".join(
+                    f"{market} {'开市' if is_open else '休市'}"
+                    for market, is_open in calendar_status.items()
+                )
+            )
     except Exception as exc:
         report = {
             "as_of_date": args.as_of or date.today().isoformat(),
@@ -720,7 +748,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     _, markdown_path = write_report(report, args.output_dir)
-    if args.send_email:
+    if args.send_email and report["estimate_mode"] != "skipped_non_trading_day":
         send_report_email(
             f"160125 盘后估算净值 {report['as_of_date']} = {report['nav_estimate']:.4f}",
             markdown_path.read_text(encoding="utf-8"),
